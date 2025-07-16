@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    name: Release with GoReleaser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: meithon/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Get release info
+        id: release-info
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          TARBALL_URL="https://github.com/meithon/helm-release/archive/refs/tags/${TAG}.tar.gz"
+          echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
+          TARBALL_SHA=$(curl -sL ${TARBALL_URL} | shasum -a 256 | cut -d ' ' -f 1)
+          echo "tarball_sha=${TARBALL_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Update formula
+        run: |
+          cat > homebrew-tap/helm-release.rb << EOF
+          class HelmRelease < Formula
+            desc "CLI tool that performs Helm releases using standard Kubernetes resource YAML files"
+            homepage "https://github.com/meithon/helm-release"
+            url "${{ steps.release-info.outputs.tarball_url }}"
+            sha256 "${{ steps.release-info.outputs.tarball_sha }}"
+            license "MIT"
+
+            depends_on "go" => :build
+
+            def install
+              system "go", "build", *std_go_args
+            end
+
+            test do
+              system "#{bin}/helm-release", "--help"
+            end
+          end
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          cd homebrew-tap
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add helm-release.rb
+          git commit -m "Update helm-release to ${{ steps.release-info.outputs.tag }}"
+          git push
